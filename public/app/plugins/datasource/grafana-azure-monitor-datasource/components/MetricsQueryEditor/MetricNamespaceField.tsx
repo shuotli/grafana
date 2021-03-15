@@ -6,13 +6,14 @@ import { Field } from '../Field';
 import { findOption, toOption } from '../common';
 import { AzureQueryEditorFieldProps, AzureMonitorOption } from '../../types';
 
+const ERROR_SOURCE = 'metrics-metricnamespace';
 const MetricNamespaceField: React.FC<AzureQueryEditorFieldProps> = ({
   query,
   datasource,
   subscriptionId,
   variableOptionGroup,
   onQueryChange,
-  onError,
+  setError,
 }) => {
   const [metricNamespaces, setMetricNamespaces] = useState<AzureMonitorOption[]>([]);
 
@@ -29,8 +30,11 @@ const MetricNamespaceField: React.FC<AzureQueryEditorFieldProps> = ({
         query.azureMonitor.metricDefinition,
         query.azureMonitor.resourceName
       )
-      .then((results) => setMetricNamespaces(results.map(toOption)))
-      .catch((err) => onError(err));
+      .then((results) => {
+        setMetricNamespaces(results.map(toOption));
+        setError(ERROR_SOURCE, undefined);
+      })
+      .catch((err) => setError(ERROR_SOURCE, err));
   }, [
     subscriptionId,
     query.azureMonitor.resourceGroup,

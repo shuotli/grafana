@@ -22,6 +22,7 @@ describe('Azure Monitor QueryEditor', () => {
         datasource={mockDatasource}
         variableOptionGroup={variableOptionGroup}
         onChange={() => {}}
+        setError={() => {}}
       />
     );
     await waitFor(() => expect(screen.getByTestId('azure-monitor-metrics-query-editor')).toBeInTheDocument());
@@ -48,6 +49,7 @@ describe('Azure Monitor QueryEditor', () => {
         datasource={mockDatasource}
         variableOptionGroup={variableOptionGroup}
         onChange={onChange}
+        setError={() => {}}
       />
     );
 
@@ -91,6 +93,7 @@ describe('Azure Monitor QueryEditor', () => {
         datasource={mockDatasource}
         variableOptionGroup={variableOptionGroup}
         onChange={onChange}
+        setError={() => {}}
       />
     );
     await waitFor(() => expect(screen.getByTestId('azure-monitor-metrics-query-editor')).toBeInTheDocument());
