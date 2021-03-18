@@ -14,27 +14,39 @@ import (
 	"github.com/prometheus/alertmanager/nflog"
 	"github.com/prometheus/alertmanager/nflog/nflogpb"
 	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/notify/email"
+	"github.com/prometheus/alertmanager/notify/webhook"
 	"github.com/prometheus/alertmanager/pkg/labels"
 	"github.com/prometheus/alertmanager/silence"
 	"github.com/prometheus/alertmanager/silence/silencepb"
+	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/registry"
+	"github.com/grafana/grafana/pkg/services/ngalert/models"
+	"github.com/grafana/grafana/pkg/services/ngalert/store"
 	"github.com/grafana/grafana/pkg/setting"
 )
 
+const (
+	workingDir = "alerting"
+)
+
 type Alertmanager struct {
-	logger log.Logger
+	logger   log.Logger
+	Store    store.AlertingStore
+	Settings *setting.Cfg `inject:""`
 
 	// notificationLog keeps tracks of which notifications we've fired already.
 	notificationLog *nflog.Log
 	// silences keeps the track of which notifications we should not fire due to user configuration.
-	silences   *silence.Silences
-	marker     types.Marker
-	alerts     *AlertProvider
-	dispatcher *dispatch.Dispatcher
+	silences        *silence.Silences
+	marker          types.Marker
+	alerts          *AlertProvider
+	dispatcher      *dispatch.Dispatcher
+	integrationsMap map[string][]notify.Integration
 
 	wg sync.WaitGroup
 }
@@ -57,6 +69,50 @@ func (am *Alertmanager) IsDisabled() bool {
 
 func (am *Alertmanager) Init() error {
 	am.logger = log.New("alertmanager")
+	am.Store = store.DBstore{} //TODO: Is this right?
+
+	err := am.Setup()
+	if err != nil {
+		return errors.Wrap(err, "unable to start the Alertmanager")
+	}
+
+	return nil
+}
+
+// Setup takes care of initializing the various configuration we need to run an Alertmanager.
+func (am *Alertmanager) Setup() error {
+	// First, let's get the configuration we need from the database and settings.
+	q := &models.GetLatestAlertmanagerConfigurationQuery{}
+	if err := am.Store.GetLatestAlertmanagerConfiguration(q); err != nil {
+		return err
+	}
+
+	// Next, let's parse the alertmanager configuration.
+	cfg, err := parse(q.Result.AlertmanagerConfiguration, q.Result.AlertmanagerTemplates)
+	if err != nil {
+		return err
+	}
+
+	// With that, we need to make sure we persist the templates to disk.
+	paths, _, err := cfg.PersistTemplates(am.WorkingDirPath())
+	if err != nil {
+		return err
+	}
+
+	// With the templates persisted, create the template list using the paths.
+	tmpl, err := template.FromGlobs(paths...)
+	if err != nil {
+		return err
+	}
+
+	// Finally, build the integrations map using the receiver configuration and templates.
+	am.integrationsMap, err = am.buildIntegrationsMap(cfg.Alertmanager.Receivers, tmpl)
+	if err != nil {
+		return err
+	}
+
+	//TODO: DO I need to set this to the grafana URL?
+	//tmpl.ExternalURL = url.URL{}
 
 	return nil
 }
@@ -89,13 +145,12 @@ func (am *Alertmanager) Run(ctx context.Context) error {
 
 	{
 		// Now, let's put together our notification pipeline
-		receivers := buildIntegrationsMap()
-		routingStage := make(notify.RoutingStage, len(receivers))
+		routingStage := make(notify.RoutingStage, len(am.integrationsMap))
 
 		silencingStage := notify.NewMuteStage(silence.NewSilencer(am.silences, am.marker, gokit_log.NewNopLogger()))
 		//TODO: We need to unify these receivers
-		for name := range receivers {
-			stage := createReceiverStage(name, receivers[name], waitFunc, am.notificationLog)
+		for name := range am.integrationsMap {
+			stage := createReceiverStage(name, am.integrationsMap[name], waitFunc, am.notificationLog)
 			routingStage[name] = notify.MultiStage{silencingStage, stage}
 		}
 		am.dispatcher = dispatch.NewDispatcher(am.alerts, BuildRoutingConfiguration(), routingStage, am.marker, timeoutFunc, gokit_log.NewNopLogger(), nil)
@@ -171,6 +226,53 @@ func (am *Alertmanager) GetSilence(silence *types.Silence)    {}
 func (am *Alertmanager) CreateSilence(silence *types.Silence) {}
 func (am *Alertmanager) DeleteSilence(silence *types.Silence) {}
 
+func (am *Alertmanager) WorkingDirPath() string {
+	return filepath.Join(am.Settings.DataPath, workingDir)
+}
+
+// buildIntegrationsMap builds a map of name to the list of integration notifiers off of a list of receiver config.
+func (am *Alertmanager) buildIntegrationsMap(receivers []*config.Receiver, templates *template.Template) (map[string][]notify.Integration, error) {
+	integrationsMap := make(map[string][]notify.Integration, len(receivers))
+	for _, receiver := range receivers {
+		integrations, err := am.buildReceiverIntegrations(receiver, templates)
+		if err != nil {
+			return nil, err
+		}
+		integrationsMap[receiver.Name] = integrations
+	}
+
+	return integrationsMap, nil
+}
+
+// buildReceiverIntegrations builds a list of integration notifiers off of a receiver config.
+func (am *Alertmanager) buildReceiverIntegrations(receiver *config.Receiver, templates *template.Template) ([]notify.Integration, error) {
+	var (
+		errs         types.MultiError
+		integrations []notify.Integration
+		add          = func(name string, i int, rs notify.ResolvedSender, f func(l gokit_log.Logger) (notify.Notifier, error)) {
+			n, err := f(gokit_log.NewNopLogger())
+			if err != nil {
+				errs.Add(err)
+				return
+			}
+			integrations = append(integrations, notify.NewIntegration(n, rs, name, i))
+		}
+	)
+
+	for i, c := range receiver.WebhookConfigs {
+		add("webhook", i, c, func(l gokit_log.Logger) (notify.Notifier, error) { return webhook.New(c, templates, l) })
+	}
+
+	for i, c := range receiver.EmailConfigs {
+		add("email", i, c, func(l gokit_log.Logger) (notify.Notifier, error) { return email.New(c, templates, l), nil })
+	}
+
+	if errs.Len() > 0 {
+		return nil, &errs
+	}
+	return integrations, nil
+}
+
 // createReceiverStage creates a pipeline of stages for a receiver.
 func createReceiverStage(name string, integrations []notify.Integration, wait func() time.Duration, notificationLog notify.NotificationLog) notify.Stage {
 	var fs notify.FanoutStage
@@ -196,10 +298,6 @@ func createReceiverStage(name string, integrations []notify.Integration, wait fu
 func BuildRoutingConfiguration() *dispatch.Route {
 	var cfg *config.Config
 	return dispatch.NewRoute(cfg.Route, nil)
-}
-
-func buildIntegrationsMap() map[string][]notify.Integration {
-	return map[string][]notify.Integration{}
 }
 
 func waitFunc() time.Duration {
