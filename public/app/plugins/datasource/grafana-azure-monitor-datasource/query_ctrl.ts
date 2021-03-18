@@ -8,7 +8,7 @@ import { TemplateSrv } from '@grafana/runtime';
 import { auto, IPromise } from 'angular';
 import { DataFrame, PanelEvents, rangeUtil } from '@grafana/data';
 import { AzureQueryType, AzureMetricQuery, AzureMonitorQuery } from './types';
-import { convertTimeGrainsToMs } from './components/common';
+import { convertTimeGrainsToMs } from './utils/common';
 import Datasource from './datasource';
 
 export interface ResultFormat {
