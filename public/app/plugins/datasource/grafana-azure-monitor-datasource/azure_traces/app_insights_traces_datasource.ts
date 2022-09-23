@@ -63,10 +63,9 @@ export default class AzureTracesDatasource extends AzureLogAnalyticsDatasource {
 
   convertResponseToTrace(res: DataQueryResponse): DataQueryResponse {
     const fields: Field[] = res.data[0]?.fields ?? [];
-    const serviceTags =
-      fields.filter((field: Field) => {
-        return field.name === 'serviceTags';
-      }) ?? [];
+    const serviceTags = fields.filter((field: Field) => {
+      return field.name === 'serviceTags';
+    });
     const transformedST = this.convertServiceTags(serviceTags);
     const newFields: Field[] = fields.map((field) => {
       if (field.name === 'serviceTags') {
