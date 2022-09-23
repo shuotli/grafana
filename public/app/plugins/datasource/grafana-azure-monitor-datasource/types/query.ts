@@ -87,6 +87,7 @@ export interface AzureLogsQuery {
 
   workspace?: string;
 
+  /** Trace params */
   operationId?: string;
 }
 
