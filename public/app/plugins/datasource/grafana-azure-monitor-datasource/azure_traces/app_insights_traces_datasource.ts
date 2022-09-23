@@ -46,10 +46,10 @@ export default class AzureTracesDatasource extends AzureLogAnalyticsDatasource {
     | where timestamp > $__timeFrom and timestamp < $__timeTo
     | where (operation_Id != '' and operation_Id == '${this.operationId}') or (customDimensions.ai_legacyRootId != '' and customDimensions.ai_legacyRootId == '${this.operationId}')
     | extend duration = iff(isnull(duration), toreal(0), duration)
-        | extend spanID = iff(isempty(id), tostring(new_guid()), id)
-        | extend serviceName = iff(isempty(name), column_ifexists("problemId", ""), name)
-        | project operation_Id, operation_ParentId, itemType, spanID, duration, timestamp, serviceName, customDimensions
-        | project-rename traceID = operation_Id, parentSpanID = operation_ParentId, startTime = timestamp, serviceTags = customDimensions`;
+    | extend spanID = iff(itemType == "pageView" or isempty(id), tostring(new_guid()), id)
+    | extend serviceName = iff(isempty(name), column_ifexists("problemId", ""), name)
+    | project operation_Id, operation_ParentId, itemType, spanID, duration, timestamp, serviceName, customDimensions
+    | project-rename traceID = operation_Id, parentSpanID = operation_ParentId, startTime = timestamp, serviceTags = customDimensions`;
 
     return {
       ...target,
@@ -89,13 +89,18 @@ export default class AzureTracesDatasource extends AzureLogAnalyticsDatasource {
   }
 
   convertServiceTags(serviceTags: Field[]) {
-    const stValues = serviceTags[0]?.values;
+    let stValues = serviceTags[0]?.values;
     if (!stValues) {
       return [] as unknown as Vector<TraceKeyValuePair[]>;
     }
     const newVals = [];
     for (const stValue of stValues.toArray()) {
-      const jsonObj = JSON.parse(stValue);
+      let jsonObj = null;
+      try {
+        jsonObj = JSON.parse(stValue);
+      } catch (err) {
+        throw new Error(`Could not convert Service Tags, ${err}`);
+      }
       const traceValKeys = [];
       for (const i in jsonObj) {
         const traceValKey = {
